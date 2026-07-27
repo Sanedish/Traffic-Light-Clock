@@ -1,0 +1,963 @@
+<!--
+  Traffic-Light 7-Segment Clock - Control Panel
+  ---------------------------------------------
+  Single self-contained file. No install, no build step. Open it in a browser.
+
+  4 digits (0..3, left->right) x 7 segments (a..g) x 3 lamps = 84 lamps.
+  Each segment is one traffic-light housing (red/amber/green); every lamp is
+  addressable. A lit segment shows all three lamps by default.
+
+  Wire protocol (WebSocket to the ESP-32, see the Advanced tab for the full set):
+    clock/pattern modes are uploaded as programs the clock runs standalone;
+    { "t":"frame", "cells":{ "0a":"rag" }, "colon":"a" } streams a live frame.
+    On connect the UI sends {"t":"get"} and loads the clock's current state.
+-->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Traffic-Light Clock - Control Panel</title>
+<style>
+  :root{
+    --bg:#071a2f; --bg2:#0a2138; --grid:rgba(120,175,255,.06);
+    --ink:#d3e6ff; --ink-dim:#587da9; --line:#9cc0ef; --line-2:#3d5f86;
+    --panel:#0a2137; --panel-2:#0c2942; --edge:#22496f;
+    --red:#ff5a5a; --amber:#ffc233; --green:#37e08b;
+    --mono: ui-monospace,"JetBrains Mono","IBM Plex Mono","SFMono-Regular",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{
+    background:var(--bg);
+    background-image:linear-gradient(var(--grid) 1px,transparent 1px),linear-gradient(90deg,var(--grid) 1px,transparent 1px);
+    background-size:24px 24px;
+    color:var(--ink); font-family:var(--mono); font-size:13px; line-height:1.5;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:1080px;margin:0 auto;padding:20px 20px 60px}
+
+  header{border-bottom:1px solid var(--edge);padding-bottom:14px;margin-bottom:18px}
+  header h1{font-size:15px;font-weight:600;margin:0;letter-spacing:.1em;text-transform:uppercase}
+  .dot{width:10px;height:10px;border-radius:50%;background:var(--ink-dim);display:inline-block}
+  .dot.on{background:var(--green);box-shadow:0 0 8px var(--green)}
+  .dot.err{background:var(--red);box-shadow:0 0 8px var(--red)}
+
+  .sheet{border:1px solid var(--edge);border-radius:3px;background:linear-gradient(180deg,var(--bg2),var(--bg));padding:10px 10px 6px;margin-bottom:18px}
+  svg{display:block;width:100%;height:auto}
+  .housing{fill:rgba(120,175,255,.03);stroke:var(--line-2);stroke-width:1}
+  .diglabel{fill:var(--ink-dim);font-size:12px;font-family:var(--mono);letter-spacing:.2em}
+  .lamp{fill:transparent;stroke:var(--line-2);stroke-width:1;cursor:pointer;transition:fill .06s}
+  .lamp:hover{stroke:var(--line)}
+  .lamp.on.red{fill:var(--red);stroke:#ffd9d9;filter:drop-shadow(0 0 3px var(--red)) drop-shadow(0 0 7px var(--red))}
+  .lamp.on.amber{fill:var(--amber);stroke:#ffe9b0;filter:drop-shadow(0 0 3px var(--amber)) drop-shadow(0 0 7px var(--amber))}
+  .lamp.on.green{fill:var(--green);stroke:#c3ffe2;filter:drop-shadow(0 0 3px var(--green)) drop-shadow(0 0 7px var(--green))}
+  .colon{fill:transparent;stroke:var(--line-2);stroke-width:1;cursor:pointer;transition:fill .06s}
+  .colon:hover{stroke:var(--line)}
+  .colon.on{fill:currentColor;filter:drop-shadow(0 0 5px currentColor)}
+  svg.dim .lamp.on,svg.dim .colon.on{filter:none;opacity:.55}
+
+  .tabs{display:flex;gap:2px;border-bottom:1px solid var(--edge);margin-bottom:16px;flex-wrap:wrap}
+  .tab{background:none;border:1px solid transparent;border-bottom:none;color:var(--ink-dim);
+    font-family:var(--mono);font-size:11px;letter-spacing:.16em;text-transform:uppercase;
+    padding:10px 16px;cursor:pointer;border-radius:3px 3px 0 0;position:relative;top:1px}
+  .tab:hover{color:var(--ink)}
+  .tab.active{color:var(--ink);border-color:var(--edge);background:var(--panel);border-bottom:1px solid var(--panel)}
+  .tab.adv{margin-left:auto;opacity:.6;font-size:10px}
+  .tab.adv.active{opacity:1}
+
+  .panel{display:none} .panel.active{display:block}
+  .row{display:flex;gap:12px;flex-wrap:wrap;align-items:flex-start}
+  .card{background:var(--panel);border:1px solid var(--edge);border-radius:3px;padding:16px 18px;flex:1;min-width:250px}
+  .card h3{margin:0 0 14px;font-size:10px;letter-spacing:.22em;text-transform:uppercase;color:var(--ink-dim);border-bottom:1px solid var(--edge);padding-bottom:8px}
+  label.f{display:flex;align-items:center;gap:9px;margin:9px 0;font-size:13px;color:var(--ink);cursor:pointer}
+  label.f input[type=checkbox]{width:16px;height:16px;accent-color:var(--green)}
+
+  button.b,.filebtn{background:var(--panel-2);border:1px solid var(--line-2);color:var(--ink);
+    font-family:var(--mono);font-size:12px;padding:11px 15px;border-radius:3px;cursor:pointer;
+    transition:border-color .1s,background .1s;display:inline-flex;align-items:center;justify-content:center;gap:8px}
+  button.b:hover,.filebtn:hover{border-color:var(--line);background:#10314e}
+  button.b:active{transform:translateY(1px)}
+  button.b.go{border-color:var(--green);color:#bffce0}
+  button.b.stop{border-color:var(--red);color:#ffd0d0}
+  button.b.big{padding:14px 20px;letter-spacing:.06em}
+  button.b.sm{padding:6px 9px;font-size:11px}
+  .btnrow{display:flex;gap:10px;flex-wrap:wrap;margin-top:6px}
+  .btncol{display:flex;flex-direction:column;gap:10px}
+
+  input[type=text],input[type=number],select,textarea{background:var(--bg);border:1px solid var(--line-2);
+    color:var(--ink);font-family:var(--mono);font-size:13px;padding:9px 10px;border-radius:3px;width:100%}
+  select{cursor:pointer}
+  input:focus,select:focus,textarea:focus{outline:none;border-color:var(--line)}
+  .field{margin:10px 0}
+  .field>span{display:block;font-size:11px;letter-spacing:.08em;color:var(--ink-dim);text-transform:uppercase;margin-bottom:5px}
+  textarea{resize:vertical;line-height:1.55}
+  .note{font-size:12.5px;color:var(--ink-dim);line-height:1.6;margin:0 0 4px}
+  .note.top{margin-bottom:12px}
+  hr.sep{border:none;border-top:1px solid var(--edge);margin:16px 0}
+
+  .steps{display:flex;flex-direction:column;gap:2px;margin-top:10px;max-height:340px;overflow:auto;padding:2px;position:relative}
+  .step{display:flex;align-items:center;gap:9px;flex:none;border:1px solid transparent;border-left:3px solid var(--line-2);
+    border-radius:2px;padding:3px 8px;background:var(--bg);font-size:11px;cursor:pointer}
+  .step:hover{background:var(--panel-2)}
+  .step.cur{border-left-color:var(--green);background:rgba(55,224,139,.07)}
+  .step.sel{border-left-color:var(--amber);background:rgba(255,194,51,.07)}
+  .step.over{border-top:1px dashed var(--line)}
+  .step .idx{color:var(--ink-dim);min-width:20px;text-align:right}
+  .step canvas{width:96px;height:auto;background:#04101d;border:1px solid #16344f;border-radius:2px;flex:none}
+  .step input{width:70px;padding:3px 6px;font-size:11px;flex:none;margin-left:auto}
+  .step .u{color:var(--ink-dim);font-size:10px}
+  .step .b{padding:3px 8px;font-size:11px}
+
+  .console{background:#04101d;border:1px solid var(--edge);border-radius:3px;padding:10px 12px;height:150px;overflow:auto;font-size:11px;color:#9ec6f2;white-space:pre-wrap}
+  .console .err{color:var(--red)} .console .sys{color:var(--ink-dim)}
+  code.k{color:var(--amber);background:#0006;padding:1px 5px;border-radius:2px}
+  .events{display:flex;flex-wrap:wrap;gap:8px}
+  .events .ev{background:var(--panel-2);border:1px solid var(--amber);color:#ffe6ad;padding:8px 12px;border-radius:3px;cursor:pointer;font-size:11px}
+  .events .ev:hover{background:#2a2410}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header><h1>Traffic-Light Clock - Control Panel</h1></header>
+
+  <div class="sheet">
+    <svg id="board" viewBox="0 0 700 300" role="img" aria-label="Traffic-light seven segment clock"></svg>
+  </div>
+
+  <div class="tabs" id="tabs">
+    <button class="tab active" data-tab="clock">Clock</button>
+    <button class="tab" data-tab="test">Display test</button>
+    <button class="tab" data-tab="patterns">Patterns</button>
+    <button class="tab" data-tab="music">Media</button>
+    <button class="tab" data-tab="hardware">Hardware</button>
+    <button class="tab adv" data-tab="advanced">Advanced</button>
+  </div>
+
+  <!-- CLOCK -->
+  <section class="panel active" data-panel="clock">
+    <div class="row">
+      <div class="card">
+        <h3>Timekeeping</h3>
+        <p class="note top">Shows this computer's system time.</p>
+        <div class="btnrow">
+          <button class="b go big" id="clkRun">Run</button>
+          <button class="b stop big" id="clkHold">Hold</button>
+        </div>
+        <hr class="sep"/>
+        <label class="f"><input type="checkbox" id="clk24" checked/> 24-hour time</label>
+        <label class="f"><input type="checkbox" id="clkLead" checked/> Leading zero on the hour (09:05)</label>
+        <label class="f"><input type="checkbox" id="clkBlink" checked/> Blink the colon</label>
+        <label class="f"><input type="checkbox" id="clkDim"/> Dim (night mode)</label>
+      </div>
+      <div class="card">
+        <h3>Colour</h3>
+        <div class="field"><span>Colon colour</span>
+          <select id="clkColonColor"><option value="amber">Amber</option><option value="red">Red</option><option value="green">Green</option></select>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- DISPLAY TEST -->
+  <section class="panel" data-panel="test">
+    <div class="row">
+      <div class="card">
+        <h3>Lamp check</h3>
+        <div class="btncol">
+          <button class="b big" id="tstAllOn">All lamps on</button>
+          <button class="b" id="tstCycle">Cycle red → amber → green</button>
+          <button class="b stop" id="tstAllOff">All lamps off</button>
+        </div>
+        <p class="note" style="margin-top:14px">Click any lamp - or the colon - on the diagram to toggle it by hand.</p>
+      </div>
+      <div class="card">
+        <h3>Show one digit</h3>
+        <div class="field"><span>Position</span>
+          <select id="tstDigitIdx"><option>0</option><option>1</option><option>2</option><option>3</option></select>
+        </div>
+        <div class="field"><span>Character (0–9, A–Z, or blank)</span>
+          <input type="text" id="tstDigitCh" maxlength="1" placeholder="8"/>
+        </div>
+        <div class="btnrow"><button class="b go" id="tstSetDigit">Show</button></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- PATTERNS -->
+  <section class="panel" data-panel="patterns">
+    <div class="row">
+      <div class="card" style="flex:2">
+        <h3>Pattern</h3>
+        <div class="btnrow">
+          <button class="b go" id="patPlay">Play</button>
+          <button class="b stop" id="patStop">Stop</button>
+          <label class="f" style="margin:0 0 0 6px"><input type="checkbox" id="patLoop" checked/> Repeat</label>
+        </div>
+        <div class="field" style="max-width:220px;margin-top:14px"><span>Step length (ms)</span>
+          <input type="number" id="patDur" value="200" min="20" step="10"/>
+        </div>
+        <div class="btnrow">
+          <button class="b sm" id="patDurAll">Set all steps to this</button>
+          <button class="b sm" id="patDurHalf">All ×½ (faster)</button>
+          <button class="b sm" id="patDurDouble">All ×2 (slower)</button>
+        </div>
+        <div class="btnrow">
+          <button class="b" id="patCapture">Capture display as a step</button>
+          <button class="b stop sm" id="patClear">Clear all steps</button>
+        </div>
+        <p class="note" style="margin-top:12px">Click a step to edit it live on the display · drag to reorder.</p>
+        <div class="steps" id="patSteps"></div>
+        <p class="note" id="patEmpty">No steps yet. Generate an effect, load a built-in pattern, or press <em>Capture display as a step</em>.</p>
+      </div>
+      <div class="card">
+        <h3>Generate</h3>
+        <div class="field"><span>Effect</span>
+          <select id="genKind">
+            <option value="scroll">Scroll text</option>
+            <option value="wave">Wave</option>
+            <option value="wipe">Wipe left → right</option>
+            <option value="rain">Rain (top → bottom)</option>
+            <option value="sparkle">Sparkle</option>
+            <option value="pulse">Traffic pulse</option>
+          </select>
+        </div>
+        <div class="field"><span>Colour</span>
+          <select id="genCol"><option value="full">Full segment</option><option value="red">Red</option><option value="amber">Amber</option><option value="green">Green</option></select>
+        </div>
+        <div class="field"><span>Text (scroll only)</span><input type="text" id="genText" placeholder="HELLO" maxlength="40"/></div>
+        <div class="btnrow"><button class="b go" id="genGo">Generate &amp; play</button></div>
+        <p class="note">Frame time comes from “Step length”.</p>
+      </div>
+      <div class="card">
+        <h3>Built-in</h3>
+        <div class="btncol">
+          <button class="b" id="preChase">Chase</button>
+          <button class="b" id="preFlash">Flash</button>
+          <button class="b" id="preAlarm">Alarm (red flash)</button>
+        </div>
+        <hr class="sep"/>
+        <h3>Files</h3>
+        <div class="btncol">
+          <button class="filebtn" id="patSave">Save pattern to file</button>
+          <label class="filebtn">Load pattern from file<input type="file" id="patLoad" accept=".json,application/json" hidden/></label>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- MUSIC -->
+  <section class="panel" data-panel="music">
+    <div class="row">
+      <div class="card">
+        <h3>Media visualiser</h3>
+        <div class="btnrow">
+          <label class="filebtn">Choose audio or video<input type="file" id="vizFile" accept="audio/*,video/*" hidden/></label>
+          <button class="b go" id="vizPlay">Play</button>
+          <button class="b stop" id="vizStop">Stop</button>
+          <button class="b" id="vizSend">Send to clock</button>
+          <button class="filebtn" id="vizSave">Save animation to file</button>
+        </div>
+        <p class="note" id="vizStat" style="margin-top:12px">No song loaded.</p>
+        <p class="note">Saved animations can be loaded from the Patterns tab at any time</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- HARDWARE -->
+  <section class="panel" data-panel="hardware">
+    <div class="row">
+      <div class="card">
+        <h3>Output:</h3>
+        <div class="field"><span>To display or not to display...</span>
+          <select id="lnMode">
+            <option value="sim">Simulation (the fancy thingy above)</option>
+            <option value="ws">Network (the big fucking clock)</option>
+          </select>
+        </div>
+        <div class="field"><span>Clock address</span>
+          <input type="text" id="lnUrl" value="" placeholder="ws://host:port"/>
+        </div>
+        <div class="btnrow">
+          <button class="b go" id="lnConnect">Connect</button>
+          <button class="b stop" id="lnDisconnect">Disconnect</button>
+          <button class="b" id="lnTest">Send display now</button>
+        </div>
+      </div>
+      <div class="card">
+        <h3>What the clock doing?</h3>
+        <p style="font-size:15px;letter-spacing:.05em"><span class="dot" id="hwDot"></span> <span id="hwTxt"></span>Simulating</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ADVANCED: scripting + wire protocol -->
+  <section class="panel" data-panel="advanced">
+    <div class="row">
+      <div class="card" style="flex:2">
+        <h3>Scripting</h3>
+        <textarea id="flowCode" rows="11" spellcheck="false" placeholder="// e.g.  every(500, () => showTime())"></textarea>
+        <div class="btnrow" style="margin-top:10px">
+          <button class="b go" id="flowRun">Run</button>
+          <button class="b stop" id="flowStop">Stop</button>
+        </div>
+        <p class="note" style="margin-top:10px">API: <code class="k">clear()</code> <code class="k">fill(c)</code>
+          <code class="k">setLamp(d,seg,c,on)</code> <code class="k">setSegment(d,seg,'rag')</code>
+          <code class="k">setDigit(d,ch,c)</code> <code class="k">showTime()</code> <code class="k">colon(on,c)</code>
+          <code class="k">on(evt,fn)</code> <code class="k">every(ms,fn)</code> <code class="k">after(ms,fn)</code> <code class="k">log(...)</code></p>
+        <p class="note" style="color:#c99">!! This code runs without a Sandbox and CAN harm your system - Use common sense !!</p>
+      </div>
+      <div class="card">
+        <h3>Event triggers</h3>
+        <p class="note top">Fire a named event at handlers registered with <code class="k">on(...)</code>.</p>
+        <div class="events" id="flowEvents"></div>
+        <div class="row" style="gap:8px;margin-top:12px">
+          <input type="text" id="flowNewEv" placeholder="event name"/>
+          <button class="b" id="flowAddEv">Add</button>
+        </div>
+        <hr class="sep"/>
+        <h3 style="margin-top:0">Console</h3>
+        <div class="console" id="flowConsole"></div>
+      </div>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <div class="card">
+        <h3>Wire protocol</h3>
+        <div class="field"><span>Current frame (sent to hardware)</span>
+          <textarea id="edWire" rows="3" readonly></textarea>
+        </div>
+        <textarea rows="12" readonly style="font-size:11px">UI -> clock
+  {"t":"get"}                                      request current state
+  {"t":"frame","cells":{"0a":"rag"},"colon":"a"}   show a static frame now
+  {"t":"clock","h24":true,"lead":true,"blink":true,"color":"full",
+   "colonColor":"amber","now":1690000000000}       run the clock standalone; "now" = epoch ms for time sync
+  {"t":"pattern","loop":true,"frames":[{"duration":200,"cells":{},"colon":""}]}
+                                                   play a pattern standalone
+
+clock -> UI  (reply to "get")
+  {"t":"state","mode":"clock|pattern|frame","clock":{...},"pattern":{...},"frame":{...}}
+
+cells key = digit+segment, value = lit lamps (r/a/g); absent = dark
+colon = "" or first letter of colour</textarea>
+      </div>
+    </div>
+  </section>
+
+</div>
+
+<script>
+"use strict";
+(() => {
+  // ---- geometry -----------------------------------------------------------
+  const DIGITS = 4;
+  const SEGS = ["a","b","c","d","e","f","g"];
+  const LAMPS = ["red","amber","green"];
+  const FULL = "rag";
+
+  const OX = 40, OY = 44, DW = 110, DH = 200, T = 24, GAP = 48, COLON_GAP = 76;
+  const LAMP_R = 6.5, LAMP_PITCH = 18;
+  const DIGX = [0, DW+GAP, DW+GAP + DW+COLON_GAP, DW+GAP + DW+COLON_GAP + DW+GAP];
+  const HALF = (DH - T) / 2;
+  const SEGRECT = {
+    a:{x:T,y:0,w:DW-2*T,h:T,o:"h"}, g:{x:T,y:HALF,w:DW-2*T,h:T,o:"h"}, d:{x:T,y:DH-T,w:DW-2*T,h:T,o:"h"},
+    f:{x:0,y:T,w:T,h:HALF-T,o:"v"}, b:{x:DW-T,y:T,w:T,h:HALF-T,o:"v"},
+    e:{x:0,y:HALF+T,w:T,h:HALF-T,o:"v"}, c:{x:DW-T,y:HALF+T,w:T,h:HALF-T,o:"v"},
+  };
+  const FONT = {
+    "0":"abcdef","1":"bc","2":"abdeg","3":"abcdg","4":"bcfg","5":"acdfg","6":"acdefg","7":"abc","8":"abcdefg","9":"abcdfg",
+    "A":"abcefg","b":"cdefg","C":"adef","c":"deg","d":"bcdeg","E":"adefg","F":"aefg","G":"acdef","g":"abcdfg",
+    "H":"bcefg","h":"cefg","I":"ef","i":"e","J":"bcd","L":"def","n":"ceg","O":"abcdef","o":"cdeg",
+    "P":"abefg","q":"abcfg","r":"eg","S":"acdfg","t":"defg","U":"bcdef","u":"cde","y":"bcdfg","Z":"abdeg",
+    "-":"g","_":"d","=":"dg"," ":"","":""
+  };
+  // shapes a 7-segment display physically can't draw; closest stand-ins, used only after the user opts in
+  const APPROX = { "K":"befg", "M":"abcef", "V":"cde", "W":"bcdef", "X":"bcefg" };
+  // exact match first (b vs C matter), then the other case, then approximations
+  function glyph(ch){
+    ch = String(ch);
+    let s = FONT[ch] ?? FONT[ch.toLowerCase()] ?? FONT[ch.toUpperCase()];
+    if (s !== undefined) return {segs:s, approx:false};
+    s = APPROX[ch] ?? APPROX[ch.toUpperCase()];
+    if (s !== undefined) return {segs:s, approx:true};
+    return null;
+  }
+
+  // ---- state --------------------------------------------------------------
+  const state = {
+    digits: Array.from({length:DIGITS}, () => Object.fromEntries(SEGS.map(s => [s,{red:false,amber:false,green:false}]))),
+    colon: {on:false, color:"amber"},
+  };
+  const COLCHAR = {red:"r", amber:"a", green:"g"};
+  const CHARCOL = {r:"red", a:"amber", g:"green"};
+
+  // ---- single runner registry --------------------------------------------
+  // Exactly one thing drives the display at a time. Starting any driver stops
+  // every other driver first, so no orphaned timers can accumulate.
+  let activeRunner = null;                 // 'clock' | 'play' | 'flow' | 'viz' | null
+  function stopRunners(){ stopClock(); stopPlayer(); stopFlow(); stopViz(); }
+
+  // ---- svg build ----------------------------------------------------------
+  const svg = document.getElementById("board");
+  const SVGNS = "http://www.w3.org/2000/svg";
+  const el = (n, a={}) => { const e = document.createElementNS(SVGNS, n); for (const k in a) e.setAttribute(k, a[k]); return e; };
+  function lampCenters(r){
+    if (r.o === "h"){ const cy=r.y+r.h/2, cx0=r.x+r.w/2; return [-1,0,1].map(k=>({cx:cx0+k*LAMP_PITCH, cy})); }
+    const cx=r.x+r.w/2, cy0=r.y+r.h/2; return [-1,0,1].map(k=>({cx, cy:cy0+k*LAMP_PITCH}));
+  }
+  // every lamp is one addressable pixel with a real board (x,y); animations work in this
+  // space, not in segment logic. Vertical segments run red(top)/amber/green(bottom).
+  const PIXELS = [];
+  for (let d=0; d<DIGITS; d++) for (const seg of SEGS)
+    lampCenters(SEGRECT[seg]).forEach((c,i) => PIXELS.push({d, seg, lamp:LAMPS[i], x:DIGX[d]+c.cx, y:c.cy}));
+  const BOARD_W = DIGX[DIGITS-1] + DW;
+  function buildBoard(){
+    const g = el("g", {transform:`translate(${OX},${OY})`});
+    for (let d=0; d<DIGITS; d++){
+      const dg = el("g", {transform:`translate(${DIGX[d]},0)`});
+      for (const seg of SEGS){
+        const r = SEGRECT[seg];
+        dg.appendChild(el("rect", {x:r.x,y:r.y,width:r.w,height:r.h,rx:6,class:"housing"}));
+      }
+      const dl = el("text", {x:DW/2,y:DH+20,"text-anchor":"middle",class:"diglabel"}); dl.textContent="D"+d; dg.appendChild(dl);
+      g.appendChild(dg);
+    }
+    for (const p of PIXELS) g.appendChild(el("circle", {cx:p.x,cy:p.y,r:LAMP_R,class:"lamp",
+      id:`d${p.d}-${p.seg}-${p.lamp}`, "data-d":p.d, "data-seg":p.seg, "data-lamp":p.lamp}));
+    const cx = DIGX[1] + DW + COLON_GAP/2;
+    ["colon-top","colon-bottom"].forEach((id,i) => g.appendChild(el("circle", {cx,cy:DH*(i?0.66:0.34),r:11,id,class:"colon"})));
+    svg.appendChild(g);
+    svg.addEventListener("click", ev => {
+      const t = ev.target;
+      if (t.classList && t.classList.contains("colon")){ stopRunners(); state.colon.on = !state.colon.on; commit(); return; }
+      if (!t.classList || !t.classList.contains("lamp")) return;
+      stopRunners();
+      const d=+t.getAttribute("data-d"), seg=t.getAttribute("data-seg"), lamp=t.getAttribute("data-lamp");
+      state.digits[d][seg][lamp] = !state.digits[d][seg][lamp];
+      commit();
+    });
+  }
+
+  // ---- render -------------------------------------------------------------
+  function render(){
+    for (let d=0; d<DIGITS; d++) for (const seg of SEGS){
+      const cell = state.digits[d][seg];
+      for (const lamp of LAMPS){
+        const c = document.getElementById(`d${d}-${seg}-${lamp}`);
+        c.classList.toggle("on", cell[lamp]); c.classList.toggle(lamp, cell[lamp]);
+      }
+    }
+    const col = state.colon;
+    ["colon-top","colon-bottom"].forEach(id => {
+      const e = document.getElementById(id);
+      e.classList.toggle("on", col.on);
+      e.style.color = `var(--${col.color})`;   // .colon.on fills with currentColor
+    });
+    const wire = document.getElementById("edWire");
+    if (wire) wire.value = JSON.stringify(frame());
+  }
+
+  // ---- board <-> cells ----------------------------------------------------
+  function boardToCells(){
+    const cells = {};
+    for (let d=0; d<DIGITS; d++) for (const seg of SEGS){
+      const cell = state.digits[d][seg]; let s="";
+      for (const lamp of LAMPS) if (cell[lamp]) s += COLCHAR[lamp];
+      if (s) cells[`${d}${seg}`] = s;
+    }
+    return cells;
+  }
+  function cellsToBoard(cells){
+    _clear();
+    for (const k in cells){ const d=+k[0], seg=k[1];
+      for (const ch of cells[k]){ const col=CHARCOL[ch]; if (col) state.digits[d][seg][col]=true; } }
+  }
+  function frame(){ return { t:"frame", cells:boardToCells(), colon: state.colon.on ? state.colon.color[0] : "" }; }
+
+  // ---- low-level mutators (no render) ------------------------------------
+  function _clear(){ for (let d=0; d<DIGITS; d++) for (const s of SEGS){ const c=state.digits[d][s]; c.red=c.amber=c.green=false; } }
+  function _setSeg(d, seg, spec){
+    const c = state.digits[d][seg]; c.red=c.amber=c.green=false;
+    if (!spec || spec === "off") return;
+    if (spec === "full") spec = FULL;
+    if (c[spec] !== undefined){ c[spec]=true; return; }          // 'red'|'amber'|'green'
+    for (const ch of spec){ const col=CHARCOL[ch]; if (col) c[col]=true; }  // 'rag' etc.
+  }
+  function _fillAll(spec){ for (let d=0; d<DIGITS; d++) for (const s of SEGS) _setSeg(d,s,spec); }
+  function _setDigit(d, ch, color=FULL){
+    for (const s of SEGS){ const c=state.digits[d][s]; c.red=c.amber=c.green=false; }
+    const g = glyph(ch);                       // scripting/scroll take the approximation silently
+    for (const s of (g ? g.segs : "")) _setSeg(d,s,color);
+  }
+  function _showTime(o={}){
+    const now = new Date();
+    let h = now.getHours(); const m = now.getMinutes();
+    if (!o.h24){ h = h % 12 || 12; }
+    const hstr = (o.lead ? String(h).padStart(2,"0") : String(h)).padStart(2," ");
+    const chars = [hstr[0], hstr[1], String(m).padStart(2,"0")[0], String(m).padStart(2,"0")[1]];
+    chars.forEach((ch,i) => _setDigit(i, ch===" " ? " " : ch, o.color || FULL));
+    state.colon.color = o.colonColor || "amber";
+    state.colon.on = o.colonBlink ? (now.getSeconds() % 2 === 0) : true;
+  }
+  function commit(){ render(); syncSel(); push(); }
+  const allCells = str => { const c={}; for (let d=0;d<DIGITS;d++) for (const s of SEGS) c[`${d}${s}`]=str; return c; };
+
+  // =========================================================================
+  // CLOCK
+  // =========================================================================
+  let clockTimer = null;
+  function clockOpts(){ return {
+    h24: clk24.checked, lead: clkLead.checked, colonBlink: clkBlink.checked,
+    color: "full",                         // digits always light whole segments
+    colonColor: clkColonColor.value,
+  }; }
+  function startClock(){
+    select(-1); stopRunners(); activeRunner = "clock";
+    sendClock();                           // the clock keeps time itself once told to
+    const tick = () => { _showTime(clockOpts()); commit(); };
+    tick(); clockTimer = setInterval(tick, 250);
+  }
+  function stopClock(){ if (clockTimer){ clearInterval(clockTimer); clockTimer=null; } if (activeRunner==="clock") activeRunner=null; }
+  const clk24=id("clk24"), clkLead=id("clkLead"), clkBlink=id("clkBlink"), clkColonColor=id("clkColonColor");
+  [clk24, clkLead, clkBlink, clkColonColor].forEach(el =>
+    el.addEventListener("change", () => { if (activeRunner==="clock") sendClock(); }));
+  id("clkRun").onclick = startClock;
+  id("clkHold").onclick = () => { stopClock(); push(); };
+  id("clkDim").onchange = e => svg.classList.toggle("dim", e.target.checked);
+
+  // =========================================================================
+  // DISPLAY TEST   (each action lives here and nowhere else)
+  // =========================================================================
+  id("tstAllOn").onclick  = () => { stopRunners(); _fillAll(FULL); state.colon.on=true; state.colon.color="amber"; commit(); };
+  id("tstAllOff").onclick = () => { stopRunners(); _clear(); state.colon.on=false; commit(); };
+  id("tstCycle").onclick  = () => playFrames(["r","a","g"].map(c => ({duration:600, cells:allCells(c), colon:c})), true, false);
+  id("tstSetDigit").onclick = () => {
+    const ch = id("tstDigitCh").value || " ";
+    const g = glyph(ch);
+    if (!g){ alert(`"${ch}" cannot be shown on a 7-segment display.`); return; }
+    if (g.approx && !confirm(`"${ch}" cannot be shown properly on a 7-segment display.\nShow the closest approximation anyway?`)) return;
+    stopRunners();
+    _setDigit(+id("tstDigitIdx").value, ch);
+    commit();
+  };
+
+  // =========================================================================
+  // PATTERNS  - one player drives all animation (patterns, presets, cycle)
+  // =========================================================================
+  const steps = [];                        // the saved / editable step list
+  const player = { list:[], i:0, loop:false, timer:null, isSteps:false };
+  const patSteps = id("patSteps"), patEmpty = id("patEmpty");
+  let selStep = -1, dragIdx = null;        // selected step edits live from the big display
+
+  function playFrames(list, loop, isSteps){
+    if (!list.length) return;
+    select(-1); stopRunners(); activeRunner = "play";
+    player.list = list; player.i = 0; player.loop = !!loop; player.isSteps = !!isSteps;
+    sendPattern(list, player.loop);        // the clock plays it by itself; no need to keep the UI open
+    const tick = () => {
+      if (activeRunner !== "play") return;
+      const fr = player.list[player.i];
+      cellsToBoard(fr.cells || {});
+      if (fr.colon){ state.colon.on=true; state.colon.color=CHARCOL[fr.colon]||"amber"; } else state.colon.on=false;
+      commit(); if (player.isSteps) markCur(player.i);
+      const d = fr.duration || +id("patDur").value || 200;
+      player.i++;
+      if (player.i >= player.list.length){ if (player.loop) player.i=0; else { activeRunner=null; if (player.isSteps) markCur(-1); return; } }
+      player.timer = setTimeout(tick, d);
+    };
+    tick();
+  }
+  function stopPlayer(){ if (player.timer){ clearTimeout(player.timer); player.timer=null; } if (activeRunner==="play"){ activeRunner=null; markCur(-1); } }
+  function markCur(i){                     // playhead highlight without rebuilding the list
+    [...patSteps.children].forEach((el,k) => el.classList.toggle("cur", k===i));
+    const el = i >= 0 && patSteps.children[i]; if (!el) return;
+    // scroll only the list - scrollIntoView would drag the whole page along
+    if (el.offsetTop < patSteps.scrollTop) patSteps.scrollTop = el.offsetTop;
+    else if (el.offsetTop + el.offsetHeight > patSteps.scrollTop + patSteps.clientHeight)
+      patSteps.scrollTop = el.offsetTop + el.offsetHeight - patSteps.clientHeight;
+  }
+  function select(idx){                    // show the step on the big display; lamp clicks now edit it
+    selStep = idx;
+    [...patSteps.querySelectorAll(".step")].forEach((el,k) => el.classList.toggle("sel", k===idx));
+    if (idx < 0) return;
+    stopRunners();
+    const fr = steps[idx];
+    cellsToBoard(fr.cells||{}); state.colon.on = !!fr.colon; if (fr.colon) state.colon.color = CHARCOL[fr.colon]||"amber";
+    commit();
+  }
+  function syncSel(){                      // called from commit(): board changes flow into the selected step
+    const fr = steps[selStep]; if (!fr) return;
+    fr.cells = boardToCells(); fr.colon = state.colon.on ? state.colon.color[0] : "";
+    const box = patSteps.querySelectorAll(".step")[selStep];
+    if (box) drawThumb(box.querySelector("canvas"), fr);
+  }
+
+  // thumbnails - each step draws its own little board
+  const THUMBCOL = {r:"#ff5a5a", a:"#ffc233", g:"#37e08b"};
+  const PIXIDX = {}; for (const p of PIXELS) PIXIDX[`${p.d}${p.seg}${COLCHAR[p.lamp]}`] = p;
+  const COLON_X = DIGX[1] + DW + COLON_GAP/2;
+  function drawThumb(cv, fr){
+    const c = cv.getContext("2d");
+    c.fillStyle = "#04101d"; c.fillRect(0,0,cv.width,cv.height);
+    const X = v => 6 + v*(cv.width-12)/BOARD_W, Y = v => 6 + v*(cv.height-12)/DH;
+    const dot = (x,y,col,r) => { c.fillStyle=col; c.beginPath(); c.arc(X(x),Y(y),r,0,7); c.fill(); };
+    for (const p of PIXELS) dot(p.x, p.y, "#12304f", 2);
+    dot(COLON_X, DH*0.34, "#12304f", 2); dot(COLON_X, DH*0.66, "#12304f", 2);
+    for (const k in fr.cells||{}) for (const ch of fr.cells[k]){
+      const p = PIXIDX[k+ch]; if (p) dot(p.x, p.y, THUMBCOL[ch], 3.2);
+    }
+    if (fr.colon){ const col = THUMBCOL[fr.colon] || THUMBCOL.a;
+      dot(COLON_X, DH*0.34, col, 3.2); dot(COLON_X, DH*0.66, col, 3.2); }
+  }
+
+  const MAX_STEP_BOXES = 200;              // ponytail: a music file is thousands of frames; don't build a DOM box per frame
+  function renderSteps(){
+    patSteps.innerHTML = "";
+    patEmpty.style.display = steps.length ? "none" : "block";
+    steps.slice(0, MAX_STEP_BOXES).forEach((fr, idx) => {
+      const box = document.createElement("div");
+      box.className = "step" + (idx===selStep ? " sel" : "");
+      const fi = document.createElement("span"); fi.className = "idx";
+      fi.textContent = String(idx+1).padStart(2,"0");
+      const cv = document.createElement("canvas"); cv.width = 224; cv.height = 76;
+      drawThumb(cv, fr);
+      const dur = document.createElement("input");
+      dur.type="number"; dur.value=fr.duration; dur.min=20; dur.step=10; dur.title="Step length (ms)";
+      dur.onchange = () => fr.duration = +dur.value || 200;
+      const ms = document.createElement("span"); ms.className = "u"; ms.textContent = "ms";
+      const mk = (t,fn,tip) => { const b=document.createElement("button"); b.className="b sm"; b.textContent=t; b.title=tip; b.onclick=fn; return b; };
+      box.append(fi, cv, dur, ms,
+        mk("⧉", () => { steps.splice(idx+1,0,{duration:fr.duration, cells:{...fr.cells}, colon:fr.colon}); if (selStep>idx) selStep++; renderSteps(); }, "Duplicate step"),
+        mk("✕", () => { steps.splice(idx,1); if (selStep===idx) selStep=-1; else if (selStep>idx) selStep--; renderSteps(); }, "Delete step"));
+      box.onclick = e => { if (e.target === dur || e.target.tagName === "BUTTON") return; select(idx); };
+      // whole row drags, except the controls
+      box.onmousedown = e => { if (e.target !== dur && e.target.tagName !== "BUTTON") box.draggable = true; };
+      box.ondragend = () => { box.draggable = false; box.classList.remove("over"); };
+      box.ondragstart = e => { dragIdx = idx; e.dataTransfer.effectAllowed = "move"; };
+      box.ondragover = e => { e.preventDefault(); box.classList.add("over"); };
+      box.ondragleave = () => box.classList.remove("over");
+      box.ondrop = e => { e.preventDefault();
+        if (dragIdx===null || dragIdx===idx) return;
+        const [m] = steps.splice(dragIdx,1); steps.splice(idx,0,m); dragIdx=null; selStep=-1; renderSteps(); };
+      patSteps.appendChild(box);
+    });
+    if (steps.length > MAX_STEP_BOXES){
+      const more = document.createElement("p"); more.className = "note";
+      more.textContent = `…and ${steps.length - MAX_STEP_BOXES} more steps. The timing buttons above still change all of them.`;
+      patSteps.appendChild(more);
+    }
+  }
+  function loadSteps(list){ steps.length=0; selStep=-1; list.forEach(f => steps.push({duration:f.duration||200, cells:f.cells||{}, colon:f.colon||""})); renderSteps(); }
+
+  id("patPlay").onclick    = () => playFrames(steps, id("patLoop").checked, true);
+  id("patStop").onclick    = () => { stopPlayer(); push(); };
+  const retime = f => { steps.forEach(s => s.duration = Math.max(20, Math.round(f(s.duration)))); renderSteps(); };
+  id("patDurAll").onclick    = () => retime(() => +id("patDur").value || 200);
+  id("patDurHalf").onclick   = () => retime(d => d/2);
+  id("patDurDouble").onclick = () => retime(d => d*2);
+  id("patCapture").onclick = () => { steps.push({duration:+id("patDur").value||200, cells:boardToCells(), colon:state.colon.on?state.colon.color[0]:""}); renderSteps(); };
+  id("patClear").onclick   = () => { stopRunners(); steps.length=0; selStep=-1; renderSteps(); };
+
+  // built-in patterns: load into the editable step list, then play looping
+  id("preChase").onclick = () => { loadSteps([0,1,2,3,2,1].map(p => ({duration:120, cells:{[`${p}g`]:"rag"}, colon:""}))); playFrames(steps, true, true); };
+  id("preFlash").onclick = () => { loadSteps([{duration:350,cells:allCells("rag"),colon:"a"},{duration:350,cells:{},colon:""}]); playFrames(steps, true, true); };
+  id("preAlarm").onclick = () => { loadSteps([{duration:250,cells:allCells("r"),colon:""},{duration:250,cells:{},colon:""}]); playFrames(steps, true, true); };
+
+  // generators - build a step list from a recipe; frame time = the Step length field.
+  // Spatial effects are shapes over PIXELS: a lamp is on when shape(pixel, t) says so,
+  // and the colour choice just filters which physical lamps take part.
+  const GENCOL = {full:"rag", red:"r", amber:"a", green:"g"};
+  function pixelFrames(n, ms, col, shape){
+    const fr = [];
+    for (let i=0; i<n; i++){
+      const cells = {};
+      for (const p of PIXELS){
+        if (col !== "rag" && COLCHAR[p.lamp] !== col) continue;
+        if (!shape(p, i/n)) continue;
+        const k = `${p.d}${p.seg}`; cells[k] = (cells[k] || "") + COLCHAR[p.lamp];
+      }
+      fr.push({duration:ms, cells, colon:""});
+    }
+    return fr;
+  }
+  function genFrames(kind, col, ms, text){
+    switch (kind){
+      case "wipe":    return pixelFrames(26, ms, col, (p,t) => Math.abs(p.x - (t*(BOARD_W+140)-70)) < 46);
+      case "rain":    return pixelFrames(14, ms, col, (p,t) => Math.abs(p.y - (t*(DH+90)-45)) < 34);
+      case "wave":    return pixelFrames(18, ms, col, (p,t) => Math.abs(p.y - (DH/2 + 62*Math.sin(p.x/55 - t*2*Math.PI))) < 32);
+      case "sparkle": return pixelFrames(24, ms, col, () => Math.random() < 0.15);
+      case "pulse":   return ["r","ra","rag","ag","g",""].map(v => ({duration:ms, cells: v?allCells(v):{}, colon: v[0]||""}));
+      default: {      // scroll - text is segment-based, and a glyph segment is always the full trio
+        const fr = [], msg = "    " + (text || "HELLO") + "    ";
+        for (let i=0; i+DIGITS<=msg.length; i++){ const cells={};
+          for (let d=0; d<DIGITS; d++){ const g=glyph(msg[i+d]); if (g) for (const s of g.segs) cells[`${d}${s}`]=FULL; }
+          fr.push({duration:ms, cells, colon:""}); }
+        return fr;
+      }
+    }
+  }
+  id("genGo").onclick = () => {
+    loadSteps(genFrames(id("genKind").value, GENCOL[id("genCol").value], +id("patDur").value||200, id("genText").value.trim()));
+    playFrames(steps, true, true);
+  };
+
+  id("patSave").onclick = () => {
+    const blob = new Blob([JSON.stringify({name:"pattern", loop:id("patLoop").checked, frames:steps}, null, 2)], {type:"application/json"});
+    const a = document.createElement("a"); a.href=URL.createObjectURL(blob); a.download="clock-pattern.json"; a.click(); URL.revokeObjectURL(a.href);
+  };
+  id("patLoad").onchange = e => {
+    const f = e.target.files[0]; if (!f) return;
+    const r = new FileReader();
+    r.onload = () => { try { const o=JSON.parse(r.result); if(!Array.isArray(o.frames)) throw new Error("no frames"); loadSteps(o.frames); if(typeof o.loop==="boolean") id("patLoop").checked=o.loop; } catch(err){ flog("could not read file: "+err.message,"err"); } };
+    r.readAsText(f); e.target.value="";
+  };
+
+  // =========================================================================
+  // MUSIC VISUALISER - audio decoded & analysed locally; output = plain frames
+  // =========================================================================
+  const VIZ_MS = 80;                       // ponytail: fixed 12.5 fps - plenty for 84 lamps over WS; make it a field if a song ever needs more
+  const viz = { frames:[], audio:null, timer:null, name:"" };
+  // meter rows = the distinct pixel heights, bottom→top. Filling pixel-by-pixel makes the
+  // vertical segments run green → amber → red naturally - the hardware IS the amp gradient.
+  const ROWS = [...new Set(PIXELS.map(p => p.y))].sort((a,b) => b-a);
+  const rowOf = new Map(ROWS.map((y,i) => [y,i]));
+
+  async function bandRms(audio, freq){     // RMS per VIZ_MS window of one bandpassed copy of the song
+    const oc = new OfflineAudioContext(1, audio.length, audio.sampleRate);
+    const src = oc.createBufferSource(); src.buffer = audio;
+    const f = oc.createBiquadFilter(); f.type = "bandpass"; f.frequency.value = freq; f.Q.value = 1;
+    src.connect(f); f.connect(oc.destination); src.start();
+    const data = (await oc.startRendering()).getChannelData(0);
+    const win = Math.round(VIZ_MS/1000 * audio.sampleRate), out = [];
+    for (let i=0; i+win<=data.length; i+=win){
+      let s=0; for (let j=0;j<win;j++) s += data[i+j]*data[i+j];
+      out.push(Math.sqrt(s/win));
+    }
+    return out;
+  }
+  async function audioFrames(file){        // 4-band level meter, 90s amp style
+    const ac = new (window.AudioContext || window.webkitAudioContext)();
+    const audio = await ac.decodeAudioData(await file.arrayBuffer());
+    ac.close();
+    const bands = await Promise.all([60,250,1000,4000].map(f => bandRms(audio, f)));
+    // per-band reference = 95th percentile, so one loud spike doesn't flatten the whole song
+    const refs = bands.map(b => [...b].sort((x,y)=>x-y)[Math.floor(b.length*0.95)] || 1e-6);
+    const n = Math.min(...bands.map(b => b.length)), held = [0,0,0,0], frames = [];
+    for (let i=0; i<n; i++){
+      const cells = {};
+      for (let d=0; d<DIGITS; d++){
+        const raw = Math.min(ROWS.length, Math.round(bands[d][i]/refs[d]*ROWS.length));
+        held[d] = Math.max(raw, held[d]-1);              // fast attack, one-row-per-frame fall - the 90s amp look
+      }
+      for (const p of PIXELS) if (rowOf.get(p.y) < held[p.d]){
+        const k = `${p.d}${p.seg}`; cells[k] = (cells[k] || "") + COLCHAR[p.lamp];
+      }
+      frames.push({duration:VIZ_MS, cells, colon: held[0] >= ROWS.length-2 ? "r" : ""});
+    }
+    return frames;
+  }
+  // video: every lamp samples the picture's brightness at its own position - bright = lit
+  const PX_X0 = Math.min(...PIXELS.map(p=>p.x)), PX_X1 = Math.max(...PIXELS.map(p=>p.x));
+  const PX_Y0 = Math.min(...PIXELS.map(p=>p.y)), PX_Y1 = Math.max(...PIXELS.map(p=>p.y));
+  async function videoFrames(v){
+    const seek = t => { v.currentTime = t; return new Promise(r => { v.onseeked = r; setTimeout(r, 400); }); };
+    if (!isFinite(v.duration)) await seek(1e9);          // some recordings report Infinity until poked
+    const W = 64, H = 24, c = document.createElement("canvas"); c.width = W; c.height = H;
+    const ctx = c.getContext("2d", {willReadFrequently:true});
+    const n = Math.floor(v.duration*1000/VIZ_MS), frames = [];
+    for (let i=0; i<n; i++){
+      await seek(i*VIZ_MS/1000);
+      ctx.drawImage(v, 0, 0, W, H);                      // stretched to the board's shape
+      const d = ctx.getImageData(0, 0, W, H).data;
+      const lum = (x,y) => { const k = (y*W + x)*4; return d[k]*.3 + d[k+1]*.59 + d[k+2]*.11; };
+      const X = x => Math.round((x-PX_X0)/(PX_X1-PX_X0)*(W-1)), Y = y => Math.round((y-PX_Y0)/(PX_Y1-PX_Y0)*(H-1));
+      const cells = {};
+      for (const p of PIXELS) if (lum(X(p.x), Y(p.y)) > 127){
+        const k = `${p.d}${p.seg}`; cells[k] = (cells[k] || "") + COLCHAR[p.lamp];
+      }
+      frames.push({duration:VIZ_MS, cells, colon: lum(X(COLON_X), Y(DH/2)) > 127 ? "a" : ""});
+      if (i % 25 === 0) id("vizStat").textContent = `Analysing video… ${Math.round(i/n*100)}%`;
+    }
+    return frames;
+  }
+  id("vizFile").onchange = async e => {
+    const file = e.target.files[0]; e.target.value = ""; if (!file) return;
+    stopViz();
+    id("vizStat").textContent = "Analysing…";
+    try {
+      if (viz.audio) URL.revokeObjectURL(viz.audio.src);
+      const url = URL.createObjectURL(file);
+      if (file.type.startsWith("video")){
+        const v = document.createElement("video");
+        v.src = url; v.muted = true; v.preload = "auto";
+        await new Promise((res,rej) => { v.onloadedmetadata = res; v.onerror = () => rej(new Error("cannot decode this video")); });
+        viz.frames = await videoFrames(v);
+        v.muted = false; v.currentTime = 0;
+        viz.audio = v;                                   // sound plays in sync; the picture runs on the lamps
+      } else {
+        viz.frames = await audioFrames(file);
+        viz.audio = new Audio(url);
+      }
+      viz.name = file.name.replace(/\.[^.]+$/,"");
+      id("vizStat").textContent = `${file.name} - ${viz.frames.length} frames. Press Play.`;
+    } catch(err){ id("vizStat").textContent = "Could not read that file: " + err.message; }
+  };
+  id("vizPlay").onclick = () => {
+    if (!viz.frames.length){ id("vizStat").textContent = "Choose an audio file first."; return; }
+    select(-1); stopRunners(); activeRunner = "viz";
+    viz.audio.currentTime = 0; viz.audio.play();
+    viz.timer = setInterval(() => {                        // frame index follows the audio clock, so it can't drift
+      if (activeRunner !== "viz") return;
+      const fr = viz.frames[Math.min(viz.frames.length-1, Math.floor(viz.audio.currentTime*1000/VIZ_MS))];
+      cellsToBoard(fr.cells);
+      state.colon.on = !!fr.colon; if (fr.colon) state.colon.color = CHARCOL[fr.colon];
+      commit();
+      if (viz.audio.ended) stopViz();
+    }, 40);
+  };
+  function stopViz(){
+    if (viz.timer){ clearInterval(viz.timer); viz.timer = null; }
+    if (viz.audio) viz.audio.pause();
+    if (activeRunner === "viz") activeRunner = null;
+  }
+  id("vizStop").onclick = () => { stopViz(); push(); };
+  id("vizSend").onclick = () => {
+    if (!viz.frames.length){ id("vizStat").textContent = "Choose an audio file first."; return; }
+    if (!link.connected){ id("vizStat").textContent = "Connect to the clock first (Hardware tab)."; return; }
+    sendPattern(viz.frames, true);
+    id("vizStat").textContent = "Sent - the clock plays it on its own now.";
+  };
+  id("vizSave").onclick = () => {
+    if (!viz.frames.length){ id("vizStat").textContent = "Choose an audio file first."; return; }
+    const blob = new Blob([JSON.stringify({name:viz.name, loop:false, frames:viz.frames})], {type:"application/json"});
+    const a = document.createElement("a"); a.href=URL.createObjectURL(blob); a.download=viz.name+".pattern.json"; a.click(); URL.revokeObjectURL(a.href);
+  };
+
+  // =========================================================================
+  // ADVANCED: scripting
+  // =========================================================================
+  const flow = { handlers:{}, timers:[] };
+  const consoleEl = id("flowConsole");
+  function flog(msg, cls=""){ const d=document.createElement("div"); if(cls)d.className=cls; d.textContent=msg; consoleEl.appendChild(d); consoleEl.scrollTop=consoleEl.scrollHeight; }
+  function buildApi(){
+    const every = (ms,fn) => { const t=setInterval(()=>{ try{fn();}catch(e){flog("every: "+e.message,"err");} },ms); flow.timers.push(t); return t; };
+    const after = (ms,fn) => { const t=setTimeout(()=>{ try{fn();}catch(e){flog("after: "+e.message,"err");} },ms); flow.timers.push(t); return t; };
+    return {
+      state, Math,
+      clear(){ _clear(); commit(); },
+      fill(c){ _fillAll(c); commit(); },
+      setLamp(d,seg,c,on=true){ state.digits[d][seg][c]=on; commit(); },
+      setSegment(d,seg,spec){ _setSeg(d,seg,spec); commit(); },
+      setDigit(d,ch,c=FULL){ _setDigit(d,ch,c); commit(); },
+      showTime(o){ _showTime(o||clockOpts()); commit(); },
+      colon(on,c){ state.colon.on=!!on; if(c)state.colon.color=c; commit(); },
+      on(evt,fn){ (flow.handlers[evt] ||= []).push(fn); },
+      every, after,
+      log(...a){ flog(a.map(x=>typeof x==="object"?JSON.stringify(x):String(x)).join(" ")); },
+    };
+  }
+  function runFlow(){
+    select(-1); stopRunners(); activeRunner = "flow";
+    flow.handlers = {}; flow.timers = []; consoleEl.innerHTML = "";
+    try { new Function("api", `with(api){ ${id("flowCode").value} }`)(buildApi()); flog("script running…","sys"); }
+    catch(e){ flog("error: "+e.message,"err"); if (activeRunner==="flow") activeRunner=null; }
+  }
+  function stopFlow(){ flow.timers.forEach(t=>{ clearInterval(t); clearTimeout(t); }); flow.timers=[]; flow.handlers={}; if (activeRunner==="flow"){ activeRunner=null; flog("script stopped.","sys"); } }
+  id("flowRun").onclick = runFlow;
+  id("flowStop").onclick = stopFlow;
+
+  const events = [];
+  function renderEvents(){
+    const box = id("flowEvents"); box.innerHTML = "";
+    events.forEach(name => { const b=document.createElement("button"); b.className="ev"; b.textContent=name;
+      b.onclick = () => { const hs=flow.handlers[name]||[]; flog(`> ${name}${hs.length?"":" (no handler / script not running)"}`,"sys"); hs.forEach(fn=>{ try{fn();}catch(e){flog(name+": "+e.message,"err");} }); }; box.appendChild(b); });
+  }
+  id("flowAddEv").onclick = () => { const v=id("flowNewEv").value.trim(); if(v && !events.includes(v)){ events.push(v); id("flowNewEv").value=""; renderEvents(); } };
+
+  // =========================================================================
+  // HARDWARE (transport)
+  // =========================================================================
+  const link = { ws:null, connected:false };
+  let applying = false;                    // true while loading state pulled from the clock - don't echo it back
+  const hwDot = id("hwDot"), hwTxt = id("hwTxt");
+  function setStat(txt, cls){ hwTxt.textContent=txt; hwDot.className="dot"+(cls?(" "+cls):""); }
+  function send(obj){ if (link.connected && link.ws && link.ws.readyState===1){ try{ link.ws.send(JSON.stringify(obj)); }catch(_){} } }
+  // clock and pattern modes are uploaded as programs the clock runs by itself (the UI can
+  // close); per-frame streaming is only for live poking, scripts and the music visualiser.
+  function push(){ if (activeRunner==="clock" || activeRunner==="play") return; send(frame()); }
+  function sendClock(){ if (!applying) send({t:"clock", ...clockOpts(), now:Date.now()}); }
+  function sendPattern(frames, loop){ if (!applying) send({t:"pattern", loop:!!loop, frames}); }
+  function applyState(m){                  // current state pulled from the clock on connect
+    applying = true;
+    try {
+      if (m.clock){
+        clk24.checked = !!m.clock.h24; clkLead.checked = !!m.clock.lead; clkBlink.checked = !!m.clock.blink;
+        if (m.clock.colonColor) clkColonColor.value = m.clock.colonColor;
+      }
+      if (m.pattern && Array.isArray(m.pattern.frames) && m.pattern.frames.length){
+        loadSteps(m.pattern.frames);
+        if (typeof m.pattern.loop === "boolean") id("patLoop").checked = m.pattern.loop;
+      }
+      if (m.mode === "clock") startClock();
+      else if (m.mode === "pattern" && steps.length) playFrames(steps, id("patLoop").checked, true);
+      else if (m.frame){
+        stopRunners(); cellsToBoard(m.frame.cells||{});
+        state.colon.on = !!m.frame.colon; if (m.frame.colon) state.colon.color = CHARCOL[m.frame.colon]||"amber";
+        render();
+      }
+    } finally { applying = false; }
+  }
+  // link errors flash on the display itself: Err -> type -> code, 750ms apart
+  function textCells(str, col){
+    const cells = {};
+    for (let d=0; d<DIGITS; d++){ const g = glyph(str[d]||" "); if (g) for (const s of g.segs) cells[`${d}${s}`] = col; }
+    return cells;
+  }
+  function showError(type, code){
+    const pad = s => { s = String(s).slice(0,4); return (" ".repeat((4-s.length)>>1) + s).padEnd(4); };
+    playFrames([
+      {duration:1500, cells:textCells(pad("ERR"), FULL), colon:""},
+      {duration:1500, cells:textCells(pad(type),  FULL), colon:""},
+      {duration:2500, cells:textCells(pad(code),  FULL), colon:""},
+    ], true, false);
+  }
+  function disconnect(){ link.manual = true; if (link.ws){ try{ link.ws.close(); }catch(_){} link.ws=null; } link.connected=false; }
+  id("lnMode").onchange = e => { if (e.target.value==="sim"){ disconnect(); setStat("Simulator Only"); } };
+  id("lnConnect").onclick = () => {
+    if (id("lnMode").value !== "ws"){ setStat("Simulating! Select Network First.","err"); return; }
+    const url = id("lnUrl").value.trim();
+    link.manual = false;
+    try {
+      const ws = new WebSocket(url); link.ws = ws; setStat("Connecting…");
+      let opened = false;
+      ws.onopen  = () => { opened=true; link.connected=true; setStat("On the physical clock","on"); send({t:"get"}); };
+      ws.onmessage = ev => { try{ const m = JSON.parse(ev.data); if (m.t === "state") applyState(m); }catch(_){} };
+      ws.onerror = () => {};                       // onclose always follows and carries the code
+      ws.onclose = ev => {
+        link.connected = false;
+        if (link.manual){ setStat("Simulator Only"); return; }
+        if (!opened){ setStat("HTTP 503 - Could not reach Server","err"); showError("HTTP", 503); }
+        else { setStat("Connection lost - WS "+(ev.code||1006),"err"); showError("WS", ev.code||1006); }
+      };
+    } catch(e){ setStat("400 Bad Request - Check for typos","err"); showError("HTTP", 400); }
+  };
+  id("lnDisconnect").onclick = () => { disconnect(); setStat("Simulator Only"); };
+  id("lnTest").onclick = () => send(frame());
+
+  // =========================================================================
+  // tabs + init
+  // =========================================================================
+  id("tabs").onclick = e => { const n=e.target.dataset.tab; if(!n) return;
+    document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("active",t.dataset.tab===n));
+    document.querySelectorAll(".panel").forEach(p=>p.classList.toggle("active",p.dataset.panel===n));
+  };
+  function id(x){ return document.getElementById(x); }
+
+  buildBoard();
+  renderSteps();
+  renderEvents();
+  startClock();
+})();
+</script>
+</body>
+</html>
